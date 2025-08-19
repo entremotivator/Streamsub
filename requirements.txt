@@ -2,3 +2,4 @@ aiohttp
 requests
 pandas
 jwt
+plotly
