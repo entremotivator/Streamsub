@@ -14,6 +14,8 @@ st.set_page_config(
 )
 
 class WordPressAdminManager:
+    """Manage WordPress/WooCommerce authentication and user role checks"""
+
     def __init__(self):
         self.base_url = st.secrets["wordpress"]["base_url"]
         self.consumer_key = st.secrets["woocommerce"]["consumer_key"]
@@ -37,43 +39,54 @@ class WordPressAdminManager:
             return {"success": False, "message": str(e)}
 
     def authenticate_with_basic_auth(self, username, password):
-        """Fallback: authenticate via basic auth"""
+        """Fallback authentication using basic auth"""
         users_url = f"{self.base_url}/wp-json/wp/v2/users/me"
-        response = requests.get(users_url, auth=(username, password), timeout=30)
-        if response.status_code == 200:
-            return {"success": True, **response.json()}
-        return {"success": False, "message": response.text}
+        try:
+            response = requests.get(users_url, auth=(username, password), timeout=30)
+            if response.status_code == 200:
+                return {"success": True, **response.json()}
+            return {"success": False, "message": response.text}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
     def check_user_role(self, email, role_name):
         """Check if WordPress user has a given role"""
-        url = f"{self.base_url}/wp-json/wp/v2/users?search={email}"
-        response = requests.get(url, auth=(self.admin_username, self.admin_password), timeout=30)
-        if response.status_code == 200:
-            users = response.json()
-            if users:
-                roles = users[0].get("roles", [])
-                return {"has_role": role_name in roles, "is_admin": "administrator" in roles}
-        return {"has_role": False, "is_admin": False}
+        try:
+            url = f"{self.base_url}/wp-json/wp/v2/users?search={email}"
+            response = requests.get(url, auth=(self.admin_username, self.admin_password), timeout=30)
+            if response.status_code == 200:
+                users = response.json()
+                if users:
+                    roles = users[0].get("roles", [])
+                    return {"has_role": role_name in roles, "is_admin": "administrator" in roles}
+            return {"has_role": False, "is_admin": False}
+        except Exception as e:
+            return {"has_role": False, "is_admin": False, "error": str(e)}
 
     def get_customer_by_email(self, email):
         """Fetch WooCommerce customer info"""
-        url = f"{self.base_url}/wp-json/wc/v3/customers"
-        response = requests.get(
-            url,
-            params={"email": email},
-            auth=(self.consumer_key, self.consumer_secret),
-            timeout=30
-        )
-        if response.status_code == 200:
-            customers = response.json()
-            return customers[0] if customers else {}
-        return {}
+        try:
+            url = f"{self.base_url}/wp-json/wc/v3/customers"
+            response = requests.get(
+                url,
+                params={"email": email},
+                auth=(self.consumer_key, self.consumer_secret),
+                timeout=30
+            )
+            if response.status_code == 200:
+                customers = response.json()
+                return customers[0] if customers else {}
+            return {}
+        except Exception as e:
+            return {}
 
 def redirect_to_home():
+    """Redirect user to homepage"""
     st.markdown("Redirecting to [AIPropIQ](https://aipropiq.com) ...")
     st.stop()
 
 def login_page():
+    """Display the login page for subscribers and admin"""
     st.markdown("# 🏠 AI PropIQ")
     st.markdown("### WordPress Admin & Subscriber Portal")
 
@@ -88,6 +101,7 @@ def login_page():
         submit_button = st.form_submit_button("Login")
 
         if submit_button and username and password:
+            # Authenticate
             if auth_method == "JWT (Recommended)":
                 auth_result = admin_manager.authenticate_user(username, password)
             else:
@@ -98,7 +112,7 @@ def login_page():
 
                 if login_type == "Admin Panel":
                     role_check = admin_manager.check_user_role(user_email, "administrator")
-                    if role_check["is_admin"]:
+                    if role_check.get("is_admin"):
                         st.session_state.authenticated = True
                         st.session_state.is_admin = True
                         st.session_state.user_data = auth_result
@@ -108,7 +122,7 @@ def login_page():
                         st.error("❌ Admin role required")
                 else:
                     role_check = admin_manager.check_user_role(user_email, "subscriber")
-                    if role_check["has_role"]:
+                    if role_check.get("has_role"):
                         customer_info = admin_manager.get_customer_by_email(user_email)
                         st.session_state.authenticated = True
                         st.session_state.is_admin = False
@@ -124,5 +138,8 @@ def login_page():
                 st.error(f"❌ Login failed: {auth_result.get('message')}")
 
 if __name__ == "__main__":
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
     login_page()
+
 
