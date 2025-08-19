@@ -13,17 +13,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
 class WordPressAdminManager:
     """Manage WordPress/WooCommerce authentication and user role checks"""
 
     def __init__(self):
-        self.base_url = st.secrets["wordpress"]["base_url"]
-        self.consumer_key = st.secrets["woocommerce"]["consumer_key"]
-        self.consumer_secret = st.secrets["woocommerce"]["consumer_secret"]
-        self.jwt_secret = st.secrets["jwt"]["secret_key"]
+        # Safe secret loading with defaults
+        self.base_url = st.secrets.get("wordpress", {}).get("base_url", "")
+        self.consumer_key = st.secrets.get("woocommerce", {}).get("consumer_key", "")
+        self.consumer_secret = st.secrets.get("woocommerce", {}).get("consumer_secret", "")
+        self.jwt_secret = st.secrets.get("jwt", {}).get("secret_key", "")
         self.admin_username = st.secrets.get("wordpress", {}).get("admin_username", "admin")
         self.admin_password = st.secrets.get("wordpress", {}).get("admin_password", "")
         self.product_id = 190  # Product to check subscription access
+
+        if not self.base_url:
+            st.error("❌ Missing WordPress base URL in secrets.toml")
+            st.stop()
 
     def authenticate_user(self, username, password):
         """Authenticate user with WordPress using JWT"""
@@ -33,8 +39,7 @@ class WordPressAdminManager:
             if response.status_code == 200:
                 data = response.json()
                 return {"success": True, **data}
-            else:
-                return {"success": False, "message": response.text}
+            return {"success": False, "message": response.text}
         except Exception as e:
             return {"success": False, "message": str(e)}
 
@@ -80,10 +85,12 @@ class WordPressAdminManager:
         except Exception as e:
             return {}
 
+
 def redirect_to_home():
     """Redirect user to homepage"""
     st.markdown("Redirecting to [AIPropIQ](https://aipropiq.com) ...")
     st.stop()
+
 
 def login_page():
     """Display the login page for subscribers and admin"""
@@ -101,7 +108,6 @@ def login_page():
         submit_button = st.form_submit_button("Login")
 
         if submit_button and username and password:
-            # Authenticate
             if auth_method == "JWT (Recommended)":
                 auth_result = admin_manager.authenticate_user(username, password)
             else:
@@ -137,9 +143,8 @@ def login_page():
             else:
                 st.error(f"❌ Login failed: {auth_result.get('message')}")
 
+
 if __name__ == "__main__":
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
     login_page()
-
-
