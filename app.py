@@ -53,39 +53,41 @@ class WordPressWooCommerceAPI:
             return {'success': False, 'message': f'Authentication error: {str(e)}'}
     
     def check_subscription_status(self, user_email):
-        """Check if user has active subscription for Product ID 190"""
-        try:
-            # Get all subscriptions
-            subscriptions_url = f"{self.base_url}/wp-json/wc/v3/subscriptions"
+    """Check if a WordPress user has the 'subscriber' role"""
+    try:
+        # Get all users with this email
+        users_url = f"{self.base_url}/wp-json/wp/v2/users"
+        
+        response = requests.get(
+            users_url,
+            auth=(self.consumer_key, self.consumer_secret),
+            params={'search': user_email}
+        )
+        
+        if response.status_code == 200:
+            users = response.json()
             
-            response = requests.get(
-                subscriptions_url,
-                auth=(self.consumer_key, self.consumer_secret),
-                params={'per_page': 100}
-            )
+            for user in users:
+                if user.get('email') == user_email:
+                    roles = user.get('roles', [])
+                    if 'subscriber' in roles:
+                        return {
+                            'has_subscription': True,
+                            'role': 'subscriber',
+                            'user_id': user.get('id'),
+                            'username': user.get('username'),
+                            'email': user.get('email')
+                        }
+                    
+            return {'has_subscription': False}
+        else:
+            return {
+                'has_subscription': False,
+                'error': f"API Error {response.status_code}: {response.text}"
+            }
             
-            if response.status_code == 200:
-                subscriptions = response.json()
-                
-                for subscription in subscriptions:
-                    if subscription.get('billing', {}).get('email') == user_email:
-                        # Check if subscription contains Product ID 190
-                        for item in subscription.get('line_items', []):
-                            if item.get('product_id') == 190:
-                                return {
-                                    'has_subscription': True,
-                                    'status': subscription.get('status'),
-                                    'subscription_id': subscription.get('id'),
-                                    'next_payment': subscription.get('next_payment_date'),
-                                    'total': subscription.get('total')
-                                }
-                
-                return {'has_subscription': False}
-            else:
-                return {'has_subscription': False, 'error': 'API Error'}
-                
-        except Exception as e:
-            return {'has_subscription': False, 'error': str(e)}
+    except Exception as e:
+        return {'has_subscription': False, 'error': str(e)}
     
     def get_customers(self):
         """Get all WooCommerce customers"""
