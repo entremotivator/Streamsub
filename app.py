@@ -1,511 +1,468 @@
 import streamlit as st
 import requests
 import json
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import base64
+from io import BytesIO
 import time
 
-# ---------------------------
 # Page configuration
-# ---------------------------
 st.set_page_config(
-    page_title="AI PropIQ Dashboard",
+    page_title="AI PropIQ - Subscriber Access",
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ---------------------------
-# API Wrapper
-# ---------------------------
-class WordPressWooCommerceAPI:
+class WordPressSubscriberAuth:
     def __init__(self):
         # Use Streamlit secrets for configuration
-        wp_secrets = st.secrets.get("wordpress", {})
-        wc_secrets = st.secrets.get("woocommerce", {})
-        jwt_secrets = st.secrets.get("jwt", {})  # may be missing
-
-        self.base_url = wp_secrets.get("base_url", "").rstrip("/")
-        if not self.base_url:
-            st.stop()  # fail fast, this is required
-
-        self.consumer_key = wc_secrets.get("consumer_key", "")
-        self.consumer_secret = wc_secrets.get("consumer_secret", "")
-        # Optional – only needed if you create your own tokens
-        self.jwt_secret = jwt_secrets.get("secret_key", None)
-
-    # ---- WordPress Auth (JWT) ----
+        self.base_url = st.secrets["wordpress"]["base_url"]
+        self.consumer_key = st.secrets["woocommerce"]["consumer_key"]
+        self.consumer_secret = st.secrets["woocommerce"]["consumer_secret"]
+        self.jwt_secret = st.secrets["jwt"]["secret_key"]
+        self.product_id = 190  # Set specific product ID as required
+        
     def authenticate_user(self, username, password):
-        """Authenticate user with WordPress JWT plugin"""
+        """Authenticate user with WordPress"""
         auth_url = f"{self.base_url}/wp-json/jwt-auth/v1/token"
+        
         try:
-            response = requests.post(
-                auth_url,
-                json={"username": username, "password": password},
-                timeout=20
-            )
+            response = requests.post(auth_url, json={
+                'username': username,
+                'password': password
+            })
+            
             if response.status_code == 200:
                 data = response.json()
-                # Typical fields: token, user_email, user_nicename, user_display_name
                 return {
-                    "success": True,
-                    "token": data.get("token"),
-                    "user_email": data.get("user_email"),
-                    "user_nicename": data.get("user_nicename"),
-                    "user_display_name": data.get("user_display_name")
+                    'success': True,
+                    'token': data.get('token'),
+                    'user_email': data.get('user_email'),
+                    'user_nicename': data.get('user_nicename'),
+                    'user_display_name': data.get('user_display_name'),
+                    'user_id': data.get('user_id')
                 }
             else:
-                # Surface API message if present
-                try:
-                    msg = response.json().get("message", "Invalid credentials")
-                except Exception:
-                    msg = "Invalid credentials"
-                return {"success": False, "message": msg}
+                return {'success': False, 'message': 'Invalid credentials'}
+                
         except Exception as e:
-            return {"success": False, "message": f"Authentication error: {str(e)}"}
-
-    def check_user_is_subscriber(self, token):
-        """
-        Use the JWT token to fetch the current user and verify the 'subscriber' role.
-        This avoids requiring admin-level WooCommerce REST keys to list users.
-        """
+            return {'success': False, 'message': f'Authentication error: {str(e)}'}
+    
+    def check_subscriber_status(self, user_email):
+        """Check if user has WordPress subscriber role"""
         try:
-            me_url = f"{self.base_url}/wp-json/wp/v2/users/me"
-            headers = {"Authorization": f"Bearer {token}"}
-            resp = requests.get(me_url, headers=headers, timeout=20)
-
-            if resp.status_code == 200:
-                me = resp.json()
-                roles = me.get("roles", []) or []
-                is_subscriber = "subscriber" in roles
-                return {
-                    "has_access": is_subscriber,
-                    "role": roles,
-                    "user_id": me.get("id"),
-                    "username": me.get("slug") or me.get("name"),
-                    "email": me.get("email")
-                }
+            users_url = f"{self.base_url}/wp-json/wp/v2/users"
+            
+            response = requests.get(
+                users_url,
+                auth=(self.consumer_key, self.consumer_secret),
+                params={'search': user_email}
+            )
+            
+            if response.status_code == 200:
+                users = response.json()
+                
+                for user in users:
+                    if user.get('email') == user_email:
+                        roles = user.get('roles', [])
+                        if 'subscriber' in roles:
+                            return {
+                                'is_subscriber': True,
+                                'user_id': user.get('id'),
+                                'username': user.get('username'),
+                                'email': user.get('email'),
+                                'roles': roles
+                            }
+                        
+                return {'is_subscriber': False, 'message': 'User does not have subscriber role'}
             else:
-                return {
-                    "has_access": False,
-                    "error": f"WP users/me error {resp.status_code}: {resp.text}"
-                }
+                return {'is_subscriber': False, 'message': f"API Error: {response.status_code}"}
+                
         except Exception as e:
-            return {"has_access": False, "error": str(e)}
-
-    # ---- WooCommerce Data ----
-    def get_customers(self):
-        """Get WooCommerce customers (requires WooCommerce REST keys with read perms)"""
+            return {'is_subscriber': False, 'message': f'Error checking subscriber status: {str(e)}'}
+    
+    def get_customer_by_email(self, email):
+        """Get WooCommerce customer by email"""
         try:
-            url = f"{self.base_url}/wp-json/wc/v3/customers"
+            customers_url = f"{self.base_url}/wp-json/wc/v3/customers"
+            
             response = requests.get(
-                url,
+                customers_url,
                 auth=(self.consumer_key, self.consumer_secret),
-                params={"per_page": 100},
-                timeout=30
+                params={'email': email}
             )
+            
+            if response.status_code == 200:
+                customers = response.json()
+                if customers:
+                    return customers[0]  # Return first matching customer
+                return None
+                
+        except Exception as e:
+            st.error(f"Error fetching customer: {str(e)}")
+            return None
+    
+    def get_product_info(self, product_id):
+        """Get specific product information"""
+        try:
+            product_url = f"{self.base_url}/wp-json/wc/v3/products/{product_id}"
+            
+            response = requests.get(
+                product_url,
+                auth=(self.consumer_key, self.consumer_secret)
+            )
+            
             if response.status_code == 200:
                 return response.json()
-            return []
+            else:
+                return None
+                
         except Exception as e:
-            st.error(f"Error fetching customers: {str(e)}")
-            return []
-
-    def get_products(self):
-        """Get WooCommerce products"""
+            st.error(f"Error fetching product: {str(e)}")
+            return None
+    
+    def get_customer_orders(self, customer_id):
+        """Get orders for specific customer"""
         try:
-            url = f"{self.base_url}/wp-json/wc/v3/products"
+            orders_url = f"{self.base_url}/wp-json/wc/v3/orders"
+            
             response = requests.get(
-                url,
+                orders_url,
                 auth=(self.consumer_key, self.consumer_secret),
-                params={"per_page": 100},
-                timeout=30
+                params={'customer': customer_id}
             )
+            
             if response.status_code == 200:
                 return response.json()
-            return []
-        except Exception as e:
-            st.error(f"Error fetching products: {str(e)}")
-            return []
-
-    def get_orders(self):
-        """Get WooCommerce orders"""
-        try:
-            url = f"{self.base_url}/wp-json/wc/v3/orders"
-            response = requests.get(
-                url,
-                auth=(self.consumer_key, self.consumer_secret),
-                params={"per_page": 100},
-                timeout=30
-            )
-            if response.status_code == 200:
-                return response.json()
-            return []
+            else:
+                return []
+                
         except Exception as e:
             st.error(f"Error fetching orders: {str(e)}")
             return []
 
-# ---------------------------
-# Styles
-# ---------------------------
+def redirect_to_home():
+    """Redirect non-subscribers to aipropiq.com"""
+    st.error("Access Denied: Subscriber access required")
+    st.markdown("""
+    <div style="text-align: center; padding: 2rem;">
+        <h3>🚫 Access Restricted</h3>
+        <p>This area is restricted to WordPress subscribers only.</p>
+        <p>Redirecting to home page...</p>
+        <script>
+            setTimeout(function() {
+                window.location.href = "https://aipropiq.com";
+            }, 3000);
+        </script>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Alternative redirect method for Streamlit
+    st.markdown("""
+    <meta http-equiv="refresh" content="3;url=https://aipropiq.com">
+    """, unsafe_allow_html=True)
+
 def apply_custom_css():
-    st.markdown(
-        """
-        <style>
-        .main { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-        .stApp { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-        .login-container {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 2rem;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-        .dashboard-card {
-            background: rgba(255, 255, 255, 0.9);
-            padding: 1.5rem;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-            margin-bottom: 1rem;
-            border-left: 4px solid #667eea;
-        }
-        .metric-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; padding: 1.5rem; border-radius: 10px; text-align: center;
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-        }
-        .status-active { background: #4CAF50; color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
-        .status-inactive { background: #f44336; color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
-        .stButton > button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; border: none; border-radius: 8px; padding: 0.5rem 1rem; font-weight: 600;
-            transition: all 0.3s ease;
-        }
-        .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.2); }
-        h1, h2, h3 { color: #2c3e50; font-weight: 600; }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    """Apply custom CSS styling"""
+    st.markdown("""
+    <style>
+    .main {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+    }
+    
+    .stApp {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .login-container {
+        background: rgba(255, 255, 255, 0.95);
+        padding: 2rem;
+        border-radius: 15px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        max-width: 500px;
+        margin: 0 auto;
+    }
+    
+    .subscriber-dashboard {
+        background: rgba(255, 255, 255, 0.9);
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        margin-bottom: 1rem;
+        border-left: 4px solid #667eea;
+    }
+    
+    .product-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        margin: 1rem 0;
+    }
+    
+    .payment-info {
+        background: white;
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.1);
+        border-left: 4px solid #4CAF50;
+    }
+    
+    .access-denied {
+        background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 10px;
+        text-align: center;
+        margin: 2rem 0;
+    }
+    
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        width: 100%;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-# ---------------------------
-# Pages
-# ---------------------------
 def login_page():
+    """Display subscriber login page"""
     st.markdown('<div class="login-container">', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 2, 1])
-
-    with col2:
-        st.markdown("# 🏠 AI PropIQ Dashboard")
-        st.markdown("### Welcome Back!")
-        st.markdown("Please login to access your dashboard")
-
-        with st.form("login_form"):
-            username = st.text_input("Username", placeholder="Enter your username")
-            password = st.text_input("Password", type="password", placeholder="Enter your password")
-            submit_button = st.form_submit_button("Login", use_container_width=True)
-
-            if submit_button:
-                if username and password:
-                    api = WordPressWooCommerceAPI()
-                    result = api.authenticate_user(username, password)
-
-                    if result.get("success"):
-                        # Check WP role = subscriber using the returned JWT token
-                        access = api.check_user_is_subscriber(result["token"])
-
-                        if access.get("has_access"):
+    
+    st.markdown("# 🏠 AI PropIQ")
+    st.markdown("### Subscriber Access Portal")
+    st.markdown("Please login with your WordPress subscriber credentials")
+    
+    with st.form("subscriber_login_form"):
+        username = st.text_input("Username", placeholder="Enter your WordPress username")
+        password = st.text_input("Password", type="password", placeholder="Enter your password")
+        submit_button = st.form_submit_button("Login as Subscriber")
+        
+        if submit_button:
+            if username and password:
+                auth = WordPressSubscriberAuth()
+                
+                # Authenticate user
+                auth_result = auth.authenticate_user(username, password)
+                
+                if auth_result['success']:
+                    # Check subscriber status
+                    subscriber_status = auth.check_subscriber_status(auth_result['user_email'])
+                    
+                    if subscriber_status.get('is_subscriber'):
+                        # Get customer info from WooCommerce
+                        customer_info = auth.get_customer_by_email(auth_result['user_email'])
+                        
+                        if customer_info:
+                            # Store session data
                             st.session_state.authenticated = True
-                            st.session_state.user_data = {
-                                "user_display_name": result.get("user_display_name") or username,
-                                "user_email": result.get("user_email"),
-                                "token": result.get("token"),
-                                "roles": access.get("role", []),
-                                "user_id": access.get("user_id"),
-                                "username": access.get("username"),
-                            }
-                            # Keep a small dict for the dashboard "status" tiles
-                            st.session_state.subscription_data = {
-                                "role": access.get("role", []),
-                                "status": "subscriber" if "subscriber" in (access.get("role") or []) else "unauthorized"
-                            }
-                            st.success("Login successful! Redirecting...")
+                            st.session_state.user_data = auth_result
+                            st.session_state.subscriber_data = subscriber_status
+                            st.session_state.customer_data = customer_info
+                            st.session_state.product_id = auth.product_id
+                            
+                            st.success("✅ Subscriber login successful!")
                             time.sleep(1)
                             st.rerun()
                         else:
-                            err = access.get("error")
-                            if err:
-                                st.error(f"Access check failed: {err}")
-                            else:
-                                st.error("Access denied. You must be a WordPress user with the role 'subscriber'.")
+                            st.warning("WordPress subscriber verified, but no WooCommerce customer record found.")
+                            # Still allow access for WordPress subscribers
+                            st.session_state.authenticated = True
+                            st.session_state.user_data = auth_result
+                            st.session_state.subscriber_data = subscriber_status
+                            st.session_state.customer_data = None
+                            st.session_state.product_id = auth.product_id
+                            st.rerun()
                     else:
-                        st.error(result.get("message", "Login failed"))
+                        st.error("❌ Access denied: WordPress subscriber role required")
+                        st.info("Redirecting to aipropiq.com...")
+                        time.sleep(2)
+                        redirect_to_home()
                 else:
-                    st.error("Please enter both username and password")
+                    st.error(f"❌ Login failed: {auth_result['message']}")
+            else:
+                st.error("Please enter both username and password")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-def dashboard_page():
-    st.markdown("# 🏠 AI PropIQ Dashboard")
-    st.markdown(f"Welcome back, **{st.session_state.user_data.get('user_display_name', 'User')}**!")
-
-    role_text = ", ".join(st.session_state.user_data.get("roles", [])) or "—"
-    status_text = "Active" if "subscriber" in st.session_state.user_data.get("roles", []) else "Inactive"
-
-    col1, col2, col3, col4 = st.columns(4)
+def subscriber_dashboard():
+    """Display subscriber dashboard with product and payment info"""
+    st.markdown("# 🏠 AI PropIQ - Subscriber Dashboard")
+    st.markdown(f"Welcome, **{st.session_state.user_data['user_display_name']}**!")
+    
+    auth = WordPressSubscriberAuth()
+    
+    # Display subscriber status
+    col1, col2, col3 = st.columns(3)
+    
     with col1:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <h3>Access</h3>
-                <h2>{status_text}</h2>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        st.markdown("""
+        <div class="product-card">
+            <h3>✅ Subscriber Status</h3>
+            <h2>Active</h2>
+            <p>WordPress Subscriber</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
     with col2:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <h3>Role(s)</h3>
-                <h2>{role_text}</h2>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        st.markdown(f"""
+        <div class="product-card">
+            <h3>🎯 Product ID</h3>
+            <h2>{st.session_state.product_id}</h2>
+            <p>Assigned Product</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
     with col3:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <h3>User ID</h3>
-                <h2>{st.session_state.user_data.get('user_id', 'N/A')}</h2>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    with col4:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <h3>Username</h3>
-                <h2>{st.session_state.user_data.get('username', 'N/A')}</h2>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
+        user_roles = ', '.join(st.session_state.subscriber_data.get('roles', []))
+        st.markdown(f"""
+        <div class="product-card">
+            <h3>👤 User Role</h3>
+            <h2>Subscriber</h2>
+            <p>{user_roles}</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
     st.markdown("---")
-    st.markdown("## 📊 Property Analytics")
-
-    # Sample property data for demonstration
-    property_data = {
-        "Property": ["Downtown Condo", "Suburban House", "City Apartment", "Beach House", "Mountain Cabin"],
-        "Value": [450000, 320000, 280000, 750000, 180000],
-        "ROI": [8.5, 12.3, 6.7, 15.2, 9.8],
-        "Status": ["Active", "Active", "Pending", "Active", "Inactive"],
-    }
-    df = pd.DataFrame(property_data)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        fig_value = px.bar(df, x="Property", y="Value", title="Property Values", color="Value", color_continuous_scale="viridis")
-        fig_value.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-        st.plotly_chart(fig_value, use_container_width=True)
-
-    with c2:
-        fig_roi = px.scatter(df, x="Value", y="ROI", size="ROI", color="Status", title="Property ROI vs Value", hover_name="Property")
-        fig_roi.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-        st.plotly_chart(fig_roi, use_container_width=True)
-
-    st.markdown("## 🏘️ Property Portfolio")
-    for _, row in df.iterrows():
-        status_class = "status-active" if row["Status"] == "Active" else "status-inactive"
-        st.markdown(
-            f"""
-            <div class="property-card">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <h3>{row['Property']}</h3>
-                        <p><strong>Value:</strong> ${row['Value']:,}</p>
-                        <p><strong>ROI:</strong> {row['ROI']}%</p>
-                    </div>
-                    <div>
-                        <span class="{status_class}">{row['Status']}</span>
-                    </div>
-                </div>
+    
+    # Product Information Section
+    st.markdown("## 🛍️ Product Information")
+    
+    product_info = auth.get_product_info(st.session_state.product_id)
+    
+    if product_info:
+        st.markdown(f"""
+        <div class="subscriber-dashboard">
+            <h3>{product_info.get('name', 'Product Name')}</h3>
+            <p><strong>Price:</strong> ${product_info.get('price', '0')}</p>
+            <p><strong>Regular Price:</strong> ${product_info.get('regular_price', '0')}</p>
+            <p><strong>Status:</strong> {product_info.get('status', 'Unknown').title()}</p>
+            <p><strong>Description:</strong> {product_info.get('short_description', 'No description available')}</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.warning(f"Product ID {st.session_state.product_id} not found or inaccessible")
+    
+    # Payment Information Section
+    if st.session_state.customer_data:
+        st.markdown("## 💳 Payment Information")
+        
+        customer = st.session_state.customer_data
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            <div class="payment-info">
+                <h4>Customer Details</h4>
+                <p><strong>Name:</strong> {customer.get('first_name', '')} {customer.get('last_name', '')}</p>
+                <p><strong>Email:</strong> {customer.get('email', '')}</p>
+                <p><strong>Total Orders:</strong> {customer.get('orders_count', 0)}</p>
+                <p><strong>Total Spent:</strong> ${customer.get('total_spent', '0')}</p>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-def user_management_page():
-    st.markdown("# 👥 User Management")
-    api = WordPressWooCommerceAPI()
-    with st.spinner("Loading customers..."):
-        customers = api.get_customers()
-
-    if customers:
-        st.markdown(f"## Total Customers: {len(customers)}")
-        rows = []
-        for c in customers:
-            rows.append({
-                "ID": c.get("id"),
-                "Name": f"{c.get('first_name', '')} {c.get('last_name', '')}".strip(),
-                "Email": c.get("email"),
-                "Username": c.get("username"),
-                "Orders": c.get("orders_count", 0),
-                "Total Spent": f"${c.get('total_spent', 0)}",
-                "Date Created": (c.get("date_created") or "").split("T")[0] if c.get("date_created") else ""
-            })
-        df_customers = pd.DataFrame(rows)
-        st.dataframe(df_customers, use_container_width=True)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            fig_orders = px.histogram(df_customers, x="Orders", title="Orders Distribution", nbins=20, color_discrete_sequence=["#667eea"])
-            fig_orders.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-            st.plotly_chart(fig_orders, use_container_width=True)
-
-        with c2:
-            if not df_customers.empty:
-                df_customers["Date Created"] = pd.to_datetime(df_customers["Date Created"], errors="coerce")
-                registrations_by_month = df_customers.dropna(subset=["Date Created"]).groupby(df_customers["Date Created"].dt.to_period("M")).size()
-                fig_timeline = px.line(x=registrations_by_month.index.astype(str), y=registrations_by_month.values, title="Customer Registrations Over Time")
-                fig_timeline.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-                st.plotly_chart(fig_timeline, use_container_width=True)
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            # Get customer orders
+            orders = auth.get_customer_orders(customer.get('id'))
+            
+            if orders:
+                latest_order = orders[0]  # Most recent order
+                st.markdown(f"""
+                <div class="payment-info">
+                    <h4>Latest Order</h4>
+                    <p><strong>Order ID:</strong> #{latest_order.get('id', 'N/A')}</p>
+                    <p><strong>Status:</strong> {latest_order.get('status', 'Unknown').title()}</p>
+                    <p><strong>Total:</strong> ${latest_order.get('total', '0')}</p>
+                    <p><strong>Date:</strong> {latest_order.get('date_created', '').split('T')[0] if latest_order.get('date_created') else 'N/A'}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="payment-info">
+                    <h4>Order History</h4>
+                    <p>No orders found</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Orders table
+        if orders:
+            st.markdown("### 📦 Order History")
+            
+            order_data = []
+            for order in orders:
+                order_data.append({
+                    'Order ID': order.get('id'),
+                    'Status': order.get('status', '').title(),
+                    'Total': f"${order.get('total', 0)}",
+                    'Payment Method': order.get('payment_method_title', 'N/A'),
+                    'Date': order.get('date_created', '').split('T')[0] if order.get('date_created') else 'N/A'
+                })
+            
+            df_orders = pd.DataFrame(order_data)
+            st.dataframe(df_orders, use_container_width=True)
+    
     else:
-        st.warning("No customers found or unable to fetch customer data.")
-
-def products_page():
-    st.markdown("# 🛍️ Products Management")
-    api = WordPressWooCommerceAPI()
-    with st.spinner("Loading products..."):
-        products = api.get_products()
-
-    if products:
-        st.markdown(f"## Total Products: {len(products)}")
-        rows = []
-        for p in products:
-            rows.append({
-                "ID": p.get("id"),
-                "Name": p.get("name"),
-                "Price": f"${p.get('price', 0)}",
-                "Regular Price": f"${p.get('regular_price', 0)}",
-                "Status": p.get("status"),
-                "Stock Status": p.get("stock_status"),
-                "Categories": ", ".join([cat.get("name", "") for cat in p.get("categories", [])]),
-                "Date Created": (p.get("date_created") or "").split("T")[0] if p.get("date_created") else ""
-            })
-        df_products = pd.DataFrame(rows)
-        st.dataframe(df_products, use_container_width=True)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            prices = []
-            for p in products:
-                val = p.get("price")
-                try:
-                    if val is not None and str(val) != "":
-                        prices.append(float(val))
-                except Exception:
-                    pass
-            if prices:
-                fig_prices = px.histogram(x=prices, title="Price Distribution", nbins=20, color_discrete_sequence=["#764ba2"])
-                fig_prices.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-                st.plotly_chart(fig_prices, use_container_width=True)
-
-        with c2:
-            status_counts = df_products["Status"].value_counts()
-            fig_status = px.pie(values=status_counts.values, names=status_counts.index, title="Product Status Distribution")
-            fig_status.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-            st.plotly_chart(fig_status, use_container_width=True)
-    else:
-        st.warning("No products found or unable to fetch product data.")
-
-def orders_page():
-    st.markdown("# 📦 Orders Management")
-    api = WordPressWooCommerceAPI()
-    with st.spinner("Loading orders..."):
-        orders = api.get_orders()
-
-    if orders:
-        st.markdown(f"## Total Orders: {len(orders)}")
-        rows = []
-        for o in orders:
-            rows.append({
-                "ID": o.get("id"),
-                "Status": o.get("status"),
-                "Total": f"${o.get('total', 0)}",
-                "Customer": f"{o.get('billing', {}).get('first_name', '')} {o.get('billing', {}).get('last_name', '')}".strip(),
-                "Email": o.get("billing", {}).get("email", ""),
-                "Payment Method": o.get("payment_method_title", ""),
-                "Date Created": (o.get("date_created") or "").split("T")[0] if o.get("date_created") else ""
-            })
-        df_orders = pd.DataFrame(rows)
-        st.dataframe(df_orders, use_container_width=True)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            status_counts = df_orders["Status"].value_counts()
-            fig_status = px.bar(x=status_counts.index, y=status_counts.values, title="Order Status Distribution", color=status_counts.values, color_continuous_scale="viridis")
-            fig_status.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-            st.plotly_chart(fig_status, use_container_width=True)
-
-        with c2:
-            if not df_orders.empty:
-                df_orders["Date Created"] = pd.to_datetime(df_orders["Date Created"], errors="coerce")
-                # Parse currency safely
-                def to_float(x):
-                    if pd.isna(x): return 0.0
-                    s = str(x).replace("$", "").replace(",", "").strip()
-                    try: return float(s)
-                    except: return 0.0
-                df_orders["Total_Numeric"] = df_orders["Total"].apply(to_float)
-                revenue_by_date = df_orders.dropna(subset=["Date Created"]).groupby("Date Created")["Total_Numeric"].sum()
-                fig_revenue = px.line(x=revenue_by_date.index, y=revenue_by_date.values, title="Revenue Over Time")
-                fig_revenue.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#2c3e50"))
-                st.plotly_chart(fig_revenue, use_container_width=True)
-    else:
-        st.warning("No orders found or unable to fetch order data.")
-
-# ---------------------------
-# Main
-# ---------------------------
-def apply_custom_css_and_init():
-    apply_custom_css()
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
+        st.info("No WooCommerce customer data available. WordPress subscriber access confirmed.")
 
 def main():
-    apply_custom_css_and_init()
-
+    """Main application function"""
+    apply_custom_css()
+    
+    # Initialize session state
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    
+    # Check authentication
     if not st.session_state.authenticated:
         login_page()
         return
-
+    
+    # Sidebar for authenticated subscribers
     with st.sidebar:
         st.markdown("# 🏠 AI PropIQ")
-        st.markdown(f"**User:** {st.session_state.user_data.get('user_display_name', '—')}")
-        st.markdown(f"**Email:** {st.session_state.user_data.get('user_email', '—')}")
+        st.markdown(f"**Subscriber:** {st.session_state.user_data['user_display_name']}")
+        st.markdown(f"**Email:** {st.session_state.user_data['user_email']}")
+        st.markdown(f"**Product ID:** {st.session_state.product_id}")
         st.markdown("---")
-
-        page = st.selectbox("Navigate to:", ["Dashboard", "User Management", "Products", "Orders"])
+        
+        st.markdown("### 📊 Quick Stats")
+        if st.session_state.customer_data:
+            st.metric("Total Orders", st.session_state.customer_data.get('orders_count', 0))
+            st.metric("Total Spent", f"${st.session_state.customer_data.get('total_spent', '0')}")
+        
         st.markdown("---")
-
-        if st.button("Logout", use_container_width=True):
-            st.session_state.clear()
+        
+        if st.button("🚪 Logout", use_container_width=True):
+            # Clear session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
-
-    if page == "Dashboard":
-        dashboard_page()
-    elif page == "User Management":
-        user_management_page()
-    elif page == "Products":
-        products_page()
-    elif page == "Orders":
-        orders_page()
+    
+    # Display subscriber dashboard
+    subscriber_dashboard()
 
 if __name__ == "__main__":
     main()
